@@ -1,0 +1,78 @@
+name: Build NPU Libraries
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq wget unzip git python3 openjdk-17-jdk docker.io
+
+      - name: Clone LiteRT
+        run: |
+          git clone --depth=1 --branch v2.1.0 https://github.com/google-ai-edge/LiteRT.git litert
+          cd litert && ls -la | head -5
+
+      - name: Download NDK
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r28b-linux.zip
+          unzip -q android-ndk-r28b-linux.zip
+
+      - name: Download runtime libraries
+        run: |
+          wget -q https://github.com/google-ai-edge/LiteRT/releases/download/v2.1.0rc1/litert_npu_runtime_libraries_jit.zip
+          unzip -q litert_npu_runtime_libraries_jit.zip -d runtime 2>&1 | tail -2
+
+      - name: Build Docker image
+        run: |
+          cd litert
+          sudo docker buildx build -t litert_build_env -f docker_build/hermetic_build.Dockerfile docker_build/ 2>&1 | tail -5
+
+      - name: Build dispatch library
+        run: |
+          cd litert
+          sudo docker run --rm \
+            -v $PWD:/litert_build \
+            -v /tmp/bazel_cache:/root/.cache/bazel \
+            -v /tmp/bazel_out:/output \
+            -w /litert_build \
+            litert_build_env \
+            bash -c "bazel build //litert/vendors/mediatek/dispatch:dispatch_api_so --config=android_arm64 && cp bazel-bin/litert/vendors/mediatek/dispatch/libLiteRtDispatch_MediaTek.so /output/"
+          ls -lh /tmp/bazel_out/
+
+      - name: Build libLiteRt.so
+        run: |
+          cd litert
+          sudo docker run --rm \
+            -v $PWD:/litert_build \
+            -v /tmp/bazel_cache:/root/.cache/bazel \
+            -v /tmp/bazel_out:/output \
+            -w /litert_build \
+            litert_build_env \
+            bash -c "bazel build //litert/c:litert_runtime_c_api_shared_lib --config=android_arm64 && cp bazel-bin/litert/c/libLiteRt.so /output/"
+          ls -lh /tmp/bazel_out/
+
+      - name: Build compiler plugin
+        run: |
+          cd litert
+          sudo docker run --rm \
+            -v $PWD:/litert_build \
+            -v /tmp/bazel_cache:/root/.cache/bazel \
+            -v /tmp/bazel_out:/output \
+            -w /litert_build \
+            litert_build_env \
+            bash -c "bazel build //litert/vendors/mediatek/compiler:compiler_plugin_so --config=android_arm64 && cp bazel-bin/litert/vendors/mediatek/compiler/libLiteRtCompilerPlugin_MediaTek.so /output/"
+          ls -lh /tmp/bazel_out/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: npu-libraries
+          path: /tmp/bazel_out/*.so
